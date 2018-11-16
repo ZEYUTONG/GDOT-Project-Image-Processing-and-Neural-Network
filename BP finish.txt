@@ -1,0 +1,706 @@
+#include <iostream>
+#include <fstream>
+#include "opencv2/objdetect/objdetect.hpp"
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "Aria.h"
+#include <opencv2\core\core.hpp>
+#include <opencv2\video\background_segm.hpp>
+#include "opencv2/features2d/features2d.hpp"
+#include "opencv2/calib3d/calib3d.hpp"
+#include "opencv2/nonfree/nonfree.hpp"B
+#include <stdio.h>
+#include <math.h>
+#include <Windows.h>
+#include <stdio.h>
+#include <iomanip>
+#include <ctime>
+#include <stdlib.h> 
+#include <stdio.h>
+
+
+using namespace std;
+using namespace cv;
+
+bool detectResult(double * location, double * area); //detect the stop sign in the image
+/** Global variables */
+String cascadeName = "C:/Users/Yang/Documents/Visual Studio 2013/Projects/lianxi/lianxi/stop.xml";
+CascadeClassifier stopSignCascade;
+string winName = "Stop Sign Detection";
+CvCapture* videoCapture;
+ArRobot robot;
+RNG rng(12345);
+
+#define  innode 2  //?????  
+#define  hidenode 4//?????  
+#define  outnode 4 //?????  
+#define  trainsample 9//BP?????
+double action[trainsample][innode];
+class BpNet
+{
+public:
+	void train(double p[trainsample][innode], double t[trainsample][outnode]);//Bp??  
+	double p[trainsample][innode];     //?????  
+	double t[trainsample][outnode];    //??????  
+
+	double *recognize(double *p);//Bp??  
+	double *convert(double idistance, double icenter);
+
+	void writetrain(); //???????  
+	void readtrain(); //???????,???????????,??????????????OK  
+
+	BpNet();
+	virtual ~BpNet();
+
+public:
+	void init();
+	double w[innode][hidenode];//??????  
+	double w1[hidenode][outnode];//??????  
+	double b1[hidenode];//??????  
+	double b2[outnode];//??????  
+
+	double rate_w; //?????(???-???)  
+	double rate_w1;//????? (???-???)  
+	double rate_b1;//????????  
+	double rate_b2;//????????  
+
+	double e;//????  
+	double error;//???????  
+	double result[outnode];// Bp??  
+};
+
+BpNet::BpNet()
+{
+	error = 1.0;
+	e = 0.0;
+
+	rate_w = 0.9;  //?????(???--???)  
+	rate_w1 = 0.9; //????? (???--???)  
+	rate_b1 = 0.9; //????????  
+	rate_b2 = 0.9; //????????  
+}
+
+BpNet::~BpNet()
+{
+
+}
+
+void winit(double w[], int n) //?????  
+{
+	for (int i = 0; i<n; i++)
+		w[i] = (2.0*(double)rand() / RAND_MAX) - 1;
+}
+
+void BpNet::init()
+{
+	winit((double*)w, innode*hidenode);
+	winit((double*)w1, hidenode*outnode);
+	winit(b1, hidenode);
+	winit(b2, outnode);
+}
+
+void BpNet::train(double p[trainsample][innode], double t[trainsample][outnode])
+{
+	double pp[hidenode];//?????????  
+	double qq[outnode];//??????????????  
+	double yd[outnode];//?????  
+
+	double x[innode]; //????  
+	double x1[hidenode];//???????  
+	double x2[outnode];//???????  
+	double o1[hidenode];//??????  
+	double o2[hidenode];//??????  
+
+	for (int isamp = 0; isamp<trainsample; isamp++)//????????  
+	{
+		for (int i = 0; i<innode; i++)
+			x[i] = p[isamp][i]; //?????  
+		for (int i = 0; i<outnode; i++)
+			yd[i] = t[isamp][i]; //???????  
+
+		//??????????????  
+		for (int j = 0; j<hidenode; j++)
+		{
+			o1[j] = 0.0;
+			for (int i = 0; i<innode; i++)
+				o1[j] = o1[j] + w[i][j] * x[i];//???????????  
+			x1[j] = 1.0 / (1 + exp(-o1[j] - b1[j]));//?????????  
+			//    if(o1[j]+b1[j]>0) x1[j]=1;  
+			//else x1[j]=0;  
+		}
+
+		for (int k = 0; k<outnode; k++)
+		{
+			o2[k] = 0.0;
+			for (int j = 0; j<hidenode; j++)
+				o2[k] = o2[k] + w1[j][k] * x1[j]; //???????????  
+			x2[k] = 1.0 / (1.0 + exp(-o2[k] - b2[k])); //????????  
+			//    if(o2[k]+b2[k]>0) x2[k]=1;  
+			//    else x2[k]=0;  
+		}
+
+		for (int k = 0; k<outnode; k++)
+		{
+			qq[k] = (yd[k] - x2[k])*x2[k] * (1 - x2[k]); //????????????  
+			for (int j = 0; j<hidenode; j++)
+				w1[j][k] += rate_w1*qq[k] * x1[j];  //??????????????????  
+		}
+
+		for (int j = 0; j<hidenode; j++)
+		{
+			pp[j] = 0.0;
+			for (int k = 0; k<outnode; k++)
+				pp[j] = pp[j] + qq[k] * w1[j][k];
+			pp[j] = pp[j] * x1[j] * (1 - x1[j]); //????????  
+
+			for (int i = 0; i<innode; i++)
+				w[i][j] += rate_w*pp[j] * x[i]; //??????????????????  
+		}
+
+		for (int k = 0; k<outnode; k++)
+		{
+			e += fabs(yd[k] - x2[k])*fabs(yd[k] - x2[k]); //?????  
+		}
+		error = e / 2.0;
+
+		for (int k = 0; k<outnode; k++)
+			b2[k] = b2[k] + rate_b2*qq[k]; //?????????????????  
+		for (int j = 0; j<hidenode; j++)
+			b1[j] = b1[j] + rate_b1*pp[j]; //?????????????????  
+	}
+}
+
+double *BpNet::recognize(double *p)
+{
+	double x[innode]; //????  
+	double x1[hidenode]; //???????  
+	double x2[outnode]; //???????  
+	double o1[hidenode]; //??????  
+	double o2[hidenode]; //??????  
+
+	for (int i = 0; i<innode; i++)
+		x[i] = p[i];
+
+	for (int j = 0; j<hidenode; j++)
+	{
+		o1[j] = 0.0;
+		for (int i = 0; i<innode; i++)
+			o1[j] = o1[j] + w[i][j] * x[i]; //?????????  
+		x1[j] = 1.0 / (1.0 + exp(-o1[j] - b1[j])); //????????  
+		//if(o1[j]+b1[j]>0) x1[j]=1;  
+		//    else x1[j]=0;  
+	}
+
+	for (int k = 0; k<outnode; k++)
+	{
+		o2[k] = 0.0;
+		for (int j = 0; j<hidenode; j++)
+			o2[k] = o2[k] + w1[j][k] * x1[j];//?????????  
+		x2[k] = 1.0 / (1.0 + exp(-o2[k] - b2[k]));//????????  
+		//if(o2[k]+b2[k]>0) x2[k]=1;  
+		//else x2[k]=0;  
+	}
+
+	for (int k = 0; k<outnode; k++)
+	{
+		result[k] = x2[k];
+	}
+	return result;
+}
+
+void BpNet::writetrain()
+{
+	FILE *stream0;
+	FILE *stream1;
+	FILE *stream2;
+	FILE *stream3;
+	int i, j;
+	//????????  
+	if ((stream0 = fopen("w.txt", "w+")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	for (i = 0; i<innode; i++)
+	{
+		for (j = 0; j<hidenode; j++)
+		{
+			fprintf(stream0, "%f\n", w[i][j]);
+		}
+	}
+	fclose(stream0);
+
+	//????????  
+	if ((stream1 = fopen("w1.txt", "w+")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	for (i = 0; i<hidenode; i++)
+	{
+		for (j = 0; j<outnode; j++)
+		{
+			fprintf(stream1, "%f\n", w1[i][j]);
+		}
+	}
+	fclose(stream1);
+
+	//????????  
+	if ((stream2 = fopen("b1.txt", "w+")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	for (i = 0; i<hidenode; i++)
+		fprintf(stream2, "%f\n", b1[i]);
+	fclose(stream2);
+
+	//????????  
+	if ((stream3 = fopen("b2.txt", "w+")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	for (i = 0; i<outnode; i++)
+		fprintf(stream3, "%f\n", b2[i]);
+	fclose(stream3);
+
+}
+
+void BpNet::readtrain()
+{
+	FILE *stream0;
+	FILE *stream1;
+	FILE *stream2;
+	FILE *stream3;
+	int i, j;
+
+	//????????  
+	if ((stream0 = fopen("w.txt", "r")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	float  wx[innode][hidenode];
+	for (i = 0; i<innode; i++)
+	{
+		for (j = 0; j<hidenode; j++)
+		{
+			fscanf(stream0, "%f", &wx[i][j]);
+			w[i][j] = wx[i][j];
+		}
+	}
+	fclose(stream0);
+
+	//????????  
+	if ((stream1 = fopen("w1.txt", "r")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	float  wx1[hidenode][outnode];
+	for (i = 0; i<hidenode; i++)
+	{
+		for (j = 0; j<outnode; j++)
+		{
+			fscanf(stream1, "%f", &wx1[i][j]);
+			w1[i][j] = wx1[i][j];
+		}
+	}
+	fclose(stream1);
+
+	//????????  
+	if ((stream2 = fopen("b1.txt", "r")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	float xb1[hidenode];
+	for (i = 0; i<hidenode; i++)
+	{
+		fscanf(stream2, "%f", &xb1[i]);
+		b1[i] = xb1[i];
+	}
+	fclose(stream2);
+
+	//????????  
+	if ((stream3 = fopen("b2.txt", "r")) == NULL)
+	{
+		cout << "??????!";
+		exit(1);
+	}
+	float xb2[outnode];
+	for (i = 0; i<outnode; i++)
+	{
+		fscanf(stream3, "%f", &xb2[i]);
+		b2[i] = xb2[i];
+	}
+	fclose(stream3);
+}
+
+
+//????  
+double X[trainsample][innode] = {
+	{ 0, 0 }, { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 }, { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 }
+};
+//??????  
+double Y[trainsample][outnode] = {
+	{ 0, 0, 0, 0 },
+	{ 0.1250, 0.1250, 0.1250, 0.1250 },
+	{ 0.2500, 0.2500, 0.2500, 0.2500 },
+	{ 0.3750, 0.3750, 0.3750, 0.3750 },
+	{ 0.5000, 0.5000, 0.5000, 0.5000 },
+	{ 0.6250, 0.6250, 0.6250, 0.6250 },
+	{ 0.7500, 0.7500, 0.7500, 0.7500 },
+	{ 0.8750, 0.8750, 0.8750, 0.8750 },
+	{ 1.0000, 1.0000, 1.0000, 1.0000 }
+};
+
+double *BpNet::convert(double idistance, double icenter){
+
+	double output[innode];
+	if (icenter > 0 && icenter < 250){//左
+		if (idistance <= 300 && idistance > 0){ //退
+			output[0] = -1;
+			output[1] = -1;
+		}
+		if (idistance <= 700 && idistance >300){ //停
+			output[0] = 0;
+			output[1] = -1;
+		}
+		else if (idistance < 5000 && idistance >= 700){ //前
+			output[0] = 1;
+			output[1] = -1;
+		}
+	}
+	else if (icenter >= 250 && icenter <= 390){//停
+		if (idistance <= 300 && idistance > 0){ //退
+			output[0] = -1;
+			output[1] = 0;
+		}
+		if (idistance <= 700 && idistance >300){ //停
+			output[0] = 0;
+			output[1] = 0;
+		}
+		else if (idistance < 5000 && idistance >= 700){ //前
+			output[0] = 1;
+			output[1] = 0;
+		}
+	}
+	else if (icenter > 390 && icenter < 640){//右
+		if (idistance <= 300 && idistance > 0){ //退
+			output[0] = -1;
+			output[1] = 1;
+		}
+		if (idistance <= 700 && idistance >300){ //停
+			output[0] = 0;
+			output[1] = 1;
+		}
+		else if (idistance < 5000 && idistance >= 700){ //前
+			output[0] = 1;
+			output[1] = 1;
+		}
+	}
+	else{
+		output[0] = 0;
+		output[1] = 0;
+	}
+	return output;
+}
+int main(int argc, char **argv)
+{
+	BpNet bp;
+	bp.init();
+	int times = 0;
+	while (bp.error > 0.0001)
+	{
+		bp.e = 0.0;
+		times++;
+		bp.train(X, Y);
+		cout << "Times=" << times << " error=" << bp.error << endl;
+	}
+	cout << "trainning complete..." << endl;
+	for (int a = -1; a <= 1; a++)
+	{
+		for (int b = -1; b <= 1; b++)
+		{
+			double m[innode] = { a, b };
+			double *r = bp.recognize(m);
+			for (int i = 0; i < outnode; ++i)
+				cout << bp.result[i] << " ";
+			double cha[trainsample][outnode];
+			double mi = 100;
+			double index;
+			for (int i = 0; i < trainsample; i++)
+			{
+				for (int j = 0; j < outnode; j++)
+				{
+					//??????????  
+					cha[i][j] = (double)(fabs(Y[i][j] - bp.result[j]));
+					if (cha[i][j] < mi)
+					{
+						mi = cha[i][j];
+						index = i;
+					}
+				}
+			}
+			for (int i = 0; i < innode; ++i)
+			{
+				cout << m[i];
+				action[a][b] = index;
+			}
+			cout << " is " << index << endl;
+
+			cout << endl;
+		}
+	}
+
+	srand(time(NULL));
+
+	// Load the cascade
+	if (!stopSignCascade.load(cascadeName))
+	{
+		std::printf("Cannot load the cascade filr \n");
+		return -1;
+	}
+
+	// Open the video camera
+	//CvCapture* capture;
+	videoCapture = cvCaptureFromCAM(0);
+	if (!videoCapture)
+	{
+		std::printf("Cannot open the camera! \n");
+		return -1;
+	}
+
+
+	//initize the robot
+	Aria::init();
+	ArArgumentParser argParser(&argc, argv);
+	argParser.loadDefaultArguments();
+
+	ArRobotConnector robotConnector(&argParser, &robot);
+	ArLaserConnector laserConnector(&argParser, &robot, &robotConnector);
+
+	if (!robotConnector.connectRobot())
+	{
+		ArLog::log(ArLog::Terse, "Could not connect to the robot.");
+		if (argParser.checkHelpAndWarnUnparsed())
+		{
+			// -help not given, just exit.
+			Aria::logOptions();
+			Aria::exit(1);
+			return 1;
+		}
+	}
+
+
+	// Trigger argument parsing
+	if (!Aria::parseArgs() || !argParser.checkHelpAndWarnUnparsed())
+	{
+		Aria::logOptions();
+		Aria::exit(1);
+		return 1;
+	}
+
+	ArSonarDevice sonar;
+	robot.addRangeDevice(&sonar);
+	robot.setRotAccel(15);
+	robot.setRotDecel(15);
+	robot.setRotVelMax(15);
+	robot.setTransVelMax(100);
+	robot.runAsync(true);
+
+	// try to connect to laser. if fail, warn but continue, using sonar only
+	if (!laserConnector.connectLasers())
+	{
+		ArLog::log(ArLog::Normal, "Warning: unable to connect to requested lasers, will use robot sonar only.");
+	}
+
+	// turn on the motors, turn off amigobot sounds
+	robot.enableMotors();
+	robot.comInt(ArCommands::SOUNDTOG, 0);
+
+	//init some params
+	double distance = 0; //sonar measurement
+	double startAngle = -15;
+	double endAngle = 15;
+	double angle = 0;
+	double area = 0; // image area
+	double center; //image center
+	double theta1 = 0;
+
+	int k = 0;
+	bool n1 = false;
+	while (true){
+
+		//get the iamge loction
+		while (!detectResult(&center, &area))
+		{
+
+			theta1 = robot.getTh();
+			ArUtil::sleep(1000); //waits for 10 ms
+			if (n1 == false)
+			{
+				robot.setHeading(theta1 + 10);
+				ArUtil::sleep(1000); //waits for 10 ms
+			}
+			else if (n1 == true)
+			{
+				robot.setHeading(theta1 - 10);
+				ArUtil::sleep(1000); //waits for 10 ms
+			}
+		}
+		n1 = !n1;
+
+		cout << "the center is " << center << endl;
+
+		//get the distance measurement
+	/*	if (center >= 0 && center < 250)
+		{
+			startAngle = 35;
+			endAngle = 5;
+		}
+		else if (center >= 250 && center <= 390)
+		{
+			startAngle = 15;
+			endAngle = -15;
+		}
+		else if (center > 390 && center <= 640)
+		{
+			startAngle = -5;
+			endAngle = -35;
+		}*/
+		distance = robot.checkRangeDevicesCumulativePolar(startAngle, endAngle, &angle);
+
+		int c = 0;
+		int d = 0;
+		c = bp.convert(distance, center)[0];
+		d = bp.convert(distance, center)[1];
+
+		double theta = 0;
+		theta = robot.getTh();
+		ArUtil::sleep(1000); //waits for 10 ms
+		if (action[c][d] == 0){ //前
+			robot.stop();
+		}
+		else if (action[c][d] == 1){ //前
+			robot.setHeading(theta + 15);
+		}
+		else if (action[c][d] == 2){ //前
+			robot.setHeading(theta - 15);
+		}
+		else if (action[c][d] == 3){ //前
+			robot.move(-100);
+		}
+		else if (action[c][d] == 4){ //前
+			robot.move(100);
+		}
+		else if (action[c][d] == 5){ //前
+			robot.setHeading(theta + 15);
+			robot.move(-100);
+		}
+		else if (action[c][d] == 6){ //前
+			robot.setHeading(theta - 15);
+			robot.move(-100);
+		}
+		else if (action[c][d] == 7){ //前
+			robot.setHeading(theta + 15);
+			robot.move(100);
+		}
+		else if (action[c][d] == 8){ //前
+			robot.setHeading(theta - 15);
+			robot.move(100);
+		}
+
+
+		FILE *xyStream;
+
+		if ((xyStream = fopen("XYAxis.txt", "a+")) == NULL)
+		{
+			cout << "创建文件失败!";
+			exit(1);
+		}
+		fprintf(xyStream, "X Axis %f\n", robot.getX());
+		fprintf(xyStream, "Y Axis %f\n", robot.getY());
+		fprintf(xyStream, "Theta Change %f\n", robot.getTh());
+		fclose(xyStream);
+
+
+
+		FILE *bpStream;
+
+		if ((bpStream = fopen("BPio.txt", "a+")) == NULL)
+		{
+			cout << "创建文件失败!";
+			exit(1);
+		}
+		fprintf(bpStream, "DeltaX = %f\n", center);
+		fprintf(bpStream, "Distance = %f\n", distance);
+		fprintf(bpStream, "BPoutput[0] = %f\n", bp.result[0]);
+		fprintf(bpStream, "BPoutput[1] = %f\n", bp.result[1]);
+		fprintf(bpStream, "BPoutput[2] = %f\n", bp.result[2]);
+		fprintf(bpStream, "BPoutput[3] = %f\n", bp.result[3]);
+		fclose(bpStream);
+	}
+
+	return 0;
+}
+
+void readme()
+{
+	std::cout << " Usage: input command <object_image> camera resolution: <width> <height>" << std::endl;
+}
+
+bool detectResult(double * pLocation, double * area)
+{
+	CascadeClassifier stop_cascade;
+	stop_cascade.load("C:/Users/Yang/Documents/Visual Studio 2013/Projects/lianxi/lianxi/stop.xml");
+
+
+	Mat captureFrame;
+	Mat grayscaleFrame;
+
+	namedWindow("outputCapture", 1);
+
+
+	//Read the video stream
+
+
+	while (true)
+	{
+		VideoCapture captureDevice;
+		captureDevice.open(0);
+
+		captureDevice >> captureFrame;
+
+		cvtColor(captureFrame, grayscaleFrame, CV_BGR2GRAY);
+		equalizeHist(grayscaleFrame, grayscaleFrame);
+
+		std::vector<Rect> stops;
+
+		stop_cascade.detectMultiScale(grayscaleFrame, stops, 1.1, 3, CV_HAAR_FIND_BIGGEST_OBJECT | CV_HAAR_SCALE_IMAGE, Size(60, 60));
+		if (stops.empty())
+		{
+			printf("Did not detect the object! \n");
+
+			//display the image
+			//	imshow(winName, frame);
+			//	waitKey(100);
+			return false;
+		}
+		double tmpArea = 0;
+		for (int i = 0; i < stops.size(); i++)
+		{
+			Point pt1(stops[i].x + stops[i].width, stops[i].y + stops[i].height);
+			Point pt2(stops[i].x, stops[i].y);
+			rectangle(captureFrame, pt1, pt2, cvScalar(0, 255, 0, 0), 1, 8, 0);
+			(*pLocation) = stops[i].x;
+		}
+
+		imshow("outputCapture", captureFrame);
+		(*area) = tmpArea;
+		waitKey(33);
+		return true;
+	}
+}
